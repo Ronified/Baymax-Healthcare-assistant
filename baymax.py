@@ -1,30 +1,3 @@
-"""
-Baymax AI — JARVIS-style medical assistant (streaming + cancel + preload)
-
-Changes vs your version:
-  - Streams responses from Ollama so the UI never feels frozen
-  - Separate connect/read timeouts to prevent indefinite hangs
-  - "Cancel" button to stop a running generation safely
-  - Preloads the model at startup to avoid first-response lag
-  - Thread-safe UI updates via Tkinter's `after()`
-
-Requirements:
-    - Python 3.8+
-    - ollama installed & in PATH  → https://ollama.com
-    - pip install -r requirements.txt
-
-requirements.txt (example):
-    requests>=2.31.0
-    SpeechRecognition>=3.10.0   # optional, for mic input
-    PyAudio                      # optional; on Windows use: pipwin install pyaudio
-    pyttsx3>=2.90               # optional, for TTS
-
-Notes:
-    - On Windows, if PyAudio fails: `pip install pipwin && pipwin install pyaudio`.
-    - Ollama default port is 11434.
-    - This script will try to auto-start Ollama via `ollama serve` and then poll until ready.
-"""
-
 import os
 import sys
 import time
