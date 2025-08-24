@@ -1,3 +1,6 @@
+# Copyright (c) 2025 Mihir Kumar. All Rights Reserved.
+
+
 import os
 import sys
 import time

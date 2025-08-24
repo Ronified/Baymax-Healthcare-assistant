@@ -1,3 +1,7 @@
+# Copyright (c) 2025 Mihir Kumar. All Rights Reserved.
+
+
+
 # 🩺 Baymax Medical Chatbot (JARVIS AI Upgrade)
 
 A **Tkinter-based Medical Assistant** powered by **Ollama** (local LLM inference).  
@@ -42,3 +46,8 @@ This project is licensed under the [MIT License](LICENSE).
 
 ### Main UI
 ![App Screenshot](main_ui.png)
+
+
+## License
+All Rights Reserved © 2025 Mihir Kumar  
+Unauthorized use is prohibited. Contact: leomihir1012@gmail.com
