@@ -1,53 +1,38 @@
-# Copyright (c) 2025 Mihir Kumar. All Rights Reserved.
+# 🤖 Baymax Healthcare Assistant
 
+![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.8%2B-brightgreen)
+![GUI](https://img.shields.io/badge/GUI-Tkinter-orange)
+![AI](https://img.shields.io/badge/AI-Ollama%20LLM-red)
 
+---
 
-# 🩺 Baymax Medical Chatbot (JARVIS AI Upgrade)
-
-A **Tkinter-based Medical Assistant** powered by **Ollama** (local LLM inference).  
-Baymax provides health guidance, emergency detection, and wearable data integration.
+## 📌 Overview
+**Baymax Healthcare Assistant** is an AI-powered healthcare chatbot that provides **symptom analysis**, **emergency detection**, and **real-time medical advice** using **Ollama LLM (Mistral model)**. It includes a modern **Tkinter GUI**, **speech capabilities**, and integrates mock wearable data for enhanced health monitoring.
 
 ---
 
 ## ✨ Features
-- ✅ GUI built with **Tkinter**
-- ✅ Real-time LLM responses via **Ollama**
-- ✅ Voice Input (Speech Recognition)
-- ✅ Text-to-Speech (TTS) using pyttsx3
-- ✅ Emergency keyword detection
-- ✅ Export chat history (JSON / TXT)
+- 🧠 **AI-Powered Chat**: Uses **Ollama Mistral model** for intelligent healthcare responses.
+- 🚨 **Emergency Detection**: Alerts users if symptoms like "chest pain" or "stroke" are detected.
+- 🎤 **Voice Commands**: Optional **speech recognition** for hands-free interaction.
+- 🔊 **Text-to-Speech**: Converts AI responses into speech.
+- 💻 **Modern GUI**: Built with **Tkinter**, featuring a dark mode interface.
+- 📈 **Wearable Integration**: Displays mock data like steps, heart rate, and sleep time.
+- 🔄 **Streaming Responses**: Real-time message streaming from the AI model.
+- 💾 **Chat Management**: Save and export conversations.
+- ⚙ **Customizable Settings**: Change model, API endpoint, and timeouts easily.
+- ✅ **Offline Support**: Automatically launches Ollama server if not running.
 
 ---
 
-## 🛠️ Tech Stack
-- **Language:** Python 3.x
-- **Framework:** Tkinter
-- **LLM Backend:** Ollama (supports Mistral, LLaMA models)
-- **APIs:** Ollama local API
-- **Speech:** `speechrecognition`, `pyttsx3`
+## 🛠 Tech Stack
+- **Language**: Python 3.8+
+- **GUI**: Tkinter
+- **AI Model**: Ollama (Mistral)
+- **Speech**: `speech_recognition`, `pyttsx3`
+- **Others**: `requests`, `threading`, `json`
 
 ---
 
-## ⚡ Setup & Installation
-
-```bash
-# Clone this repo
-git clone https://github.com/YOUR-USERNAME/baymax-medical-chatbot.git
-cd baymax-medical-chatbot
-
-# Install dependencies
-pip install -r requirements.txt
-
-
-## 🛡️ License
-This project is licensed under the [MIT License](LICENSE).
-
-## 🖼 Screenshots
-
-### Main UI
-![App Screenshot](main_ui.png)
-
-
-## License
-All Rights Reserved © 2025 Mihir Kumar  
-Unauthorized use is prohibited. Contact: leomihir1012@gmail.com
+## 📂 Project Structure
