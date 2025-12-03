@@ -1,19 +1,18 @@
 # Copyright (c) 2025 Mihir Kumar. All Rights Reserved.
+# BAYMAX (JARVIS Medical AI) — with camera, India emergency numbers, and emotion polling.
 
-
-import os
-import sys
-import time
 import json
 import threading
 import subprocess
+import time
+import platform
 from datetime import datetime
 
 import requests
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
 
-# optional: speech and tts (script still runs without them)
+# optional: speech + TTS
 try:
     import speech_recognition as sr
 except Exception:
@@ -24,20 +23,36 @@ try:
 except Exception:
     pyttsx3 = None
 
+# optional: camera + emotion libs
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
+try:
+    from fer import FER
+except Exception:
+    FER = None
+
 # -----------------------------
 # Config
 # -----------------------------
 OLLAMA_URL = "http://localhost:11434"
 API_GENERATE = OLLAMA_URL + "/api/generate"
-MODEL_NAME = "mistral"            # user-requested model
+MODEL_NAME = "mistral"
 OLLAMA_START_CMD = ["ollama", "serve"]
-OLLAMA_START_WAIT = 40             # seconds to wait for Ollama to become available
-# Use tuple timeout: (connect_timeout, read_timeout-per-chunk)
+OLLAMA_START_WAIT = 40  # seconds to wait for Ollama to boot
+
 REQUEST_CONNECT_TIMEOUT = 10
 REQUEST_READ_TIMEOUT = 120
+
 VOICE_RATE = 170
 SPEAK_RESPONSES_DEFAULT = True
+ENABLE_CAMERA_DEFAULT = False       # camera off by default; toggle in settings
+EMOTION_POLL_INTERVAL = 2.0         # seconds between emotion checks
+FRAME_DOWNSCALE = 0.5               # resize factor for faster emotion detection
 
+# Emergency keywords (simple substring check)
 EMERGENCY_KEYWORDS = [
     "chest pain", "severe chest pain", "shortness of breath", "difficulty breathing",
     "unconscious", "fainting", "severe bleeding", "heavy bleeding",
@@ -45,23 +60,42 @@ EMERGENCY_KEYWORDS = [
     "severe allergic reaction", "anaphylaxis", "not breathing", "broken bone", "fracture"
 ]
 
+# Emergency contact defaults (can change region in Settings)
+EMERGENCY_CONTACTS = {
+    "india": {
+        "police": "112",
+        "ambulance": "108",
+        "note": "112 is pan-India emergency. 108 is a common ambulance number in many states."
+    },
+    "global": {
+        "police": "112",
+        "ambulance": "112",
+        "note": "Use your local emergency number if different."
+    },
+    "us_uk": {
+        "police": "911 / 999",
+        "ambulance": "911 / 999",
+        "note": "911 (US), 999 or 112 (UK)."
+    },
+}
+DEFAULT_CONTACT_REGION = "india"
+
 conversation_history = []
 history_lock = threading.Lock()
 
 # -----------------------------
-# Utility: Ollama server management
+# Ollama server management
 # -----------------------------
-
 def is_ollama_running():
     try:
         resp = requests.get(OLLAMA_URL, timeout=2)
-        return resp.status_code in (200, 404)  # 404 at root is fine; server is up
+        return resp.status_code in (200, 404)
     except requests.RequestException:
         return False
 
 
 def start_ollama_in_background():
-    """Attempt to start Ollama. Return Popen if started, else None."""
+    """Attempt to start Ollama server."""
     try:
         p = subprocess.Popen(
             OLLAMA_START_CMD,
@@ -78,15 +112,15 @@ def start_ollama_in_background():
 
 
 def ensure_ollama_running(timeout=OLLAMA_START_WAIT):
+    """Ensure Ollama is running; try to auto-start if not."""
     if is_ollama_running():
         print("✅ Ollama already running.")
         return True
 
-    print("🔄 Ollama not running. Attempting to start Ollama in background...")
+    print("🔄 Ollama not running. Attempting to start Ollama...")
     proc = start_ollama_in_background()
     if proc is None:
-        print("❌ Could not start Ollama: 'ollama' not found in PATH.")
-        print("Install Ollama (https://ollama.com) and ensure `ollama` works in your terminal.")
+        print("❌ Could not start Ollama: 'ollama' not found.")
         return False
 
     start_t = time.time()
@@ -95,26 +129,27 @@ def ensure_ollama_running(timeout=OLLAMA_START_WAIT):
             print("✅ Ollama is now running.")
             return True
         time.sleep(1)
+
     print("❌ Timeout waiting for Ollama to start.")
     return False
 
-
 # -----------------------------
-# Model interaction (Streaming)
+# LLM interaction
 # -----------------------------
-
 def build_system_prompt():
     return (
-        "You are JARVIS AI, a helpful and safety-aware medical assistant. "
-        "Provide clear evidence-based general medical information, suggest when to see a licensed professional, "
-        "and advise immediate emergency action (call emergency services) when appropriate."
+        "You are JARVIS AI, a helpful and safety-aware medical assistant called BAYMAX. "
+        "You provide clear, evidence-based general medical information, NOT diagnosis. "
+        "You always remind users to consult a licensed doctor for diagnosis or treatment. "
+        "If the user mentions severe or life-threatening symptoms, strongly advise calling "
+        "their local emergency number immediately."
     )
 
 
-def generate_stream(prompt_text):
+def generate_stream(prompt_text: str):
     """
-    Generator that yields response chunks from Ollama as they arrive.
-    Raises requests.RequestException on network/HTTP errors.
+    Stream response chunks from Ollama.
+    Yields text pieces.
     """
     payload = {
         "model": MODEL_NAME,
@@ -135,11 +170,9 @@ def generate_stream(prompt_text):
             try:
                 chunk = json.loads(raw.decode("utf-8"))
             except Exception:
-                # Best-effort fallback if line is not JSON
                 yield raw.decode("utf-8")
                 continue
 
-            # Ollama streaming returns objects with a `response` field and a final {"done": true}
             if isinstance(chunk, dict):
                 if chunk.get("response"):
                     yield chunk["response"]
@@ -148,20 +181,17 @@ def generate_stream(prompt_text):
 
 
 def preload_model():
-    """Touch the model once so the first real call is snappy. Ignore failures."""
+    """One dummy call so first real call is faster."""
     try:
         payload = {"model": MODEL_NAME, "prompt": " ", "stream": False}
         requests.post(API_GENERATE, json=payload, timeout=(5, 15))
     except Exception:
         pass
 
-
 # -----------------------------
-# TTS (pyttsx3) wrapper
+# TTS
 # -----------------------------
-
 tts_engine = None
-
 
 def init_tts():
     global tts_engine
@@ -176,8 +206,8 @@ def init_tts():
         tts_engine = None
 
 
-def speak_text(text):
-    if tts_engine is None:
+def speak_text(text: str):
+    if not text or tts_engine is None:
         return
     try:
         tts_engine.say(text)
@@ -185,52 +215,164 @@ def speak_text(text):
     except Exception as e:
         print("⚠️ TTS error:", e)
 
-
 # -----------------------------
 # Emergency detection
 # -----------------------------
-
-def detect_emergency(text):
+def detect_emergency(text: str):
     lower = text.lower()
     for kw in EMERGENCY_KEYWORDS:
         if kw in lower:
             return True, kw
     return False, None
 
+# -----------------------------
+# Camera + emotion helpers
+# -----------------------------
+def try_open_camera(max_index=3, extra_backends=True):
+    """
+    Try to open webcam robustly.
+    Returns a cv2.VideoCapture or None.
+    """
+    if cv2 is None:
+        return None
+
+    system = platform.system().lower()
+    backends = [None]
+
+    if extra_backends:
+        if "windows" in system:
+            backends += [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_FFMPEG]
+        elif "linux" in system:
+            backends += [cv2.CAP_V4L2, cv2.CAP_FFMPEG]
+        elif "darwin" in system:
+            backends += [cv2.CAP_AVFOUNDATION, cv2.CAP_QT]
+        else:
+            backends += [cv2.CAP_FFMPEG]
+
+    for idx in range(max_index + 1):
+        for backend in backends:
+            cap = None
+            try:
+                if backend is None:
+                    cap = cv2.VideoCapture(idx)
+                else:
+                    cap = cv2.VideoCapture(idx, backend)
+
+                if not cap or not cap.isOpened():
+                    if cap:
+                        cap.release()
+                    continue
+
+                ret, _ = cap.read()
+                if ret:
+                    return cap
+                else:
+                    cap.release()
+            except Exception:
+                try:
+                    if cap:
+                        cap.release()
+                except Exception:
+                    pass
+    return None
+
+
+class EmotionDetector:
+    """
+    Uses FER if available, else simple haar cascade to detect 'neutral' when face present.
+    """
+    def __init__(self):
+        self.detector = None
+        self.haar = None
+
+        if FER is not None and cv2 is not None:
+            try:
+                self.detector = FER(mtcnn=False)
+            except Exception:
+                self.detector = None
+
+        if cv2 is not None:
+            try:
+                self.haar = cv2.CascadeClassifier(
+                    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+                )
+            except Exception:
+                self.haar = None
+
+    def detect(self, frame):
+        """
+        Return (label, score) or (None, 0.0)
+        """
+        if frame is None:
+            return None, 0.0
+
+        h, w = frame.shape[:2]
+        small = cv2.resize(frame, (int(w * FRAME_DOWNSCALE), int(h * FRAME_DOWNSCALE)))
+
+        # Prefer FER if available
+        if self.detector is not None:
+            try:
+                rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+                data = self.detector.detect_emotions(rgb)
+                if data:
+                    scores = data[0]["emotions"]
+                    label = max(scores, key=scores.get)
+                    return label, float(scores[label])
+            except Exception:
+                pass
+
+        # Fallback: simple face detection → "neutral"
+        if self.haar is not None:
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            faces = self.haar.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+            if len(faces) > 0:
+                return "neutral", 0.8
+
+        return None, 0.0
 
 # -----------------------------
-# GUI helpers and app logic
+# GUI App
 # -----------------------------
-
 class BaymaxApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("JARVIS AI Medical Chatbot — Baymax")
-        self.root.geometry("920x660")
+        self.root.title("BAYMAX — JARVIS AI Medical Assistant")
+        self.root.geometry("980x700")
+
         self.speak_responses = SPEAK_RESPONSES_DEFAULT
 
-        # runtime state
+        # camera / emotion
+        self.enable_camera = ENABLE_CAMERA_DEFAULT
+        self.camera_thread = None
+        self.camera_stop_event = threading.Event()
+        self.emotion_detector = EmotionDetector()
+        self.last_emotion = None
+        self.emotion_lock = threading.Lock()
+
+        # chat runtime
         self.current_thread = None
         self.cancel_event = threading.Event()
-        self.streaming_locked = threading.Lock()  # to avoid overlapping writes
 
-        # menu
+        # ---------- Menu ----------
         men = tk.Menu(root)
         root.config(menu=men)
+
         file_menu = tk.Menu(men, tearoff=0)
         men.add_cascade(label="File", menu=file_menu)
         file_menu.add_command(label="Save conversation (JSON)", command=self.save_chat)
         file_menu.add_command(label="Export as text", command=self.export_plain_text)
         file_menu.add_separator()
         file_menu.add_command(label="Clear chat", command=self.clear_chat)
-        file_menu.add_command(label="Exit", command=root.quit)
+        file_menu.add_command(label="Exit", command=self.on_exit)
+
         men.add_command(label="Settings", command=self.open_settings)
 
+        # ---------- Header ----------
         header = tk.Frame(root, bg="#0f1720")
         header.pack(fill=tk.X)
         tk.Label(
             header,
-            text="JARVIS AI — Medical Assistant (Baymax)",
+            text="BAYMAX — JARVIS AI Medical Assistant",
             font=("Consolas", 16, "bold"),
             fg="#00FFAB",
             bg="#0f1720",
@@ -239,7 +381,7 @@ class BaymaxApp:
         wear_btn = tk.Button(header, text="Fetch Wearable Data", command=self.fetch_wearable)
         wear_btn.pack(side=tk.RIGHT, padx=10)
 
-        # chat window
+        # ---------- Chat window ----------
         self.chat_window = scrolledtext.ScrolledText(
             root,
             wrap=tk.WORD,
@@ -250,9 +392,19 @@ class BaymaxApp:
         )
         self.chat_window.pack(padx=12, pady=(6, 8), fill=tk.BOTH, expand=True)
 
-        # entry frame
+        # ---------- Status bar ----------
+        status_frame = tk.Frame(root)
+        status_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        self.emotion_label = tk.Label(status_frame, text="Emotion: N/A", anchor=tk.W)
+        self.emotion_label.pack(side=tk.LEFT)
+
+        self.model_status_label = tk.Label(status_frame, text="Model: checking...", anchor=tk.E)
+        self.model_status_label.pack(side=tk.RIGHT)
+
+        # ---------- Entry area ----------
         entry_frame = tk.Frame(root, bg="#0f1720")
-        entry_frame.pack(fill=tk.X, padx=12, pady=(0, 12))
+        entry_frame.pack(fill=tk.X, padx=12, pady=(4, 12))
 
         self.user_entry = tk.Entry(
             entry_frame,
@@ -274,10 +426,22 @@ class BaymaxApp:
         self.cancel_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.cancel_btn.config(state=tk.DISABLED)
 
-        # welcome
-        self.safe_insert("👋 Hi! I'm BAYMAX (JARVIS AI upgraded). Ask me anything health-related. Type or use the mic.\n\n")
+        # ---------- Welcome ----------
+        self.safe_insert(
+            "👋 Hi! I'm BAYMAX.\n"
+            "I can give general medical information and wellness tips.\n"
+            "I am NOT a doctor and cannot diagnose or treat.\n"
+            "If you ever feel it's an emergency, call your local emergency number immediately.\n\n"
+        )
 
-    # ----- Thread-safe UI helpers -----
+        # start camera if enabled
+        if self.enable_camera and cv2 is not None:
+            self.start_camera_thread()
+
+        # periodic status updates
+        self.root.after(1000, self.update_status_labels)
+
+    # ------------- UI helpers -------------
     def _append_text(self, text: str):
         self.chat_window.config(state=tk.NORMAL)
         self.chat_window.insert(tk.END, text)
@@ -287,7 +451,75 @@ class BaymaxApp:
     def safe_insert(self, text: str):
         self.root.after(0, self._append_text, text)
 
-    # ----- Event handlers -----
+    # ------------- Status updating -------------
+    def update_status_labels(self):
+        # model
+        running = is_ollama_running()
+        self.model_status_label.config(text="Ollama: UP" if running else "Ollama: DOWN")
+
+        # emotion
+        with self.emotion_lock:
+            if self.last_emotion:
+                label, score = self.last_emotion
+                self.emotion_label.config(text=f"Emotion: {label} ({score:.2f})")
+            else:
+                self.emotion_label.config(text="Emotion: N/A")
+
+        self.root.after(2000, self.update_status_labels)
+
+    # ------------- Camera control -------------
+    def start_camera_thread(self):
+        if cv2 is None:
+            self.safe_insert("❌ OpenCV not installed — camera disabled.\n\n")
+            return
+        if self.camera_thread and self.camera_thread.is_alive():
+            return
+        self.camera_stop_event.clear()
+        self.camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
+        self.camera_thread.start()
+        self.safe_insert("📷 Camera emotion polling started.\n\n")
+
+    def stop_camera_thread(self):
+        if self.camera_thread and self.camera_thread.is_alive():
+            self.camera_stop_event.set()
+            self.camera_thread.join(timeout=1.5)
+            self.safe_insert("📷 Camera emotion polling stopped.\n\n")
+
+    def _camera_loop(self):
+        cap = try_open_camera()
+        if not cap:
+            self.safe_insert("❌ Could not open webcam (no camera detected or permission denied).\n\n")
+            return
+
+        try:
+            while not self.camera_stop_event.is_set():
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    time.sleep(0.5)
+                    continue
+
+                label, score = self.emotion_detector.detect(frame)
+                if label is not None:
+                    with self.emotion_lock:
+                        self.last_emotion = (label, score)
+
+                    # optional gentle suggestion on stress/low mood
+                    if label in ("sad", "angry", "fear", "disgust") and score > 0.6:
+                        self.safe_insert(
+                            f"💡 You seem '{label}' ({score:.2f}). "
+                            "Consider a short break, some water, or a breathing exercise.\n\n"
+                        )
+
+                time.sleep(EMOTION_POLL_INTERVAL)
+        except Exception as e:
+            self.safe_insert(f"❌ Camera loop error: {e}\n\n")
+        finally:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+    # ------------- Events -------------
     def on_send(self, event=None):
         txt = self.user_entry.get().strip()
         if not txt:
@@ -297,53 +529,65 @@ class BaymaxApp:
 
     def on_speak(self):
         if sr is None:
-            self.safe_insert("❌ SpeechRecognition not installed or unavailable. Install it to use voice.\n\n")
+            self.safe_insert("❌ SpeechRecognition not installed. Voice not available.\n\n")
             return
         threading.Thread(target=self.listen_and_submit, daemon=True).start()
 
     def on_cancel(self):
-        # Signal cancellation and let the worker exit gracefully
         self.cancel_event.set()
         self.safe_insert("⏹️ Cancel requested. Stopping current response...\n\n")
 
-    # ----- Chat flow -----
+    def on_exit(self):
+        self.stop_camera_thread()
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+
+    # ------------- Chat flow -------------
     def set_busy(self, busy: bool):
-        if busy:
-            self.cancel_btn.config(state=tk.NORMAL)
-        else:
-            self.cancel_btn.config(state=tk.DISABLED)
+        self.cancel_btn.config(state=tk.NORMAL if busy else tk.DISABLED)
 
     def submit_user_message(self, text, source="text"):
         if self.current_thread and self.current_thread.is_alive():
             self.safe_insert("⚠️ A response is already in progress. Click 'Cancel' to stop it.\n\n")
             return
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with history_lock:
-            conversation_history.append({"role": "user", "text": text, "time": timestamp})
+            conversation_history.append({"role": "user", "text": text, "time": ts})
+
         self.safe_insert(f"🧑 You ({source}): {text}\n")
 
-        # emergency check
+        # emergency detection
         is_em, kw = detect_emergency(text)
         if is_em:
+            region_contacts = EMERGENCY_CONTACTS.get(DEFAULT_CONTACT_REGION, EMERGENCY_CONTACTS["global"])
+            police_num = region_contacts.get("police", "112")
+            ambulance_num = region_contacts.get("ambulance", "112")
+            note = region_contacts.get("note", "")
+
             emergency_msg = (
-                "⚠️ I detected possible emergency symptoms (keyword: '{}'). If this is life-threatening, "
-                "please call your local emergency services immediately (e.g., 112/911). I can provide basic first-aid info while help is on the way."
-            ).format(kw)
+                f"⚠️ I detected possible emergency-related symptoms (keyword: '{kw}').\n\n"
+                f"If this feels severe or life-threatening, call your local emergency services immediately.\n"
+                f"India quick numbers (default): Police/All-Emergency: {police_num}, Ambulance: {ambulance_num}.\n"
+                f"{note}\n\n"
+                "I can share general first-aid steps, but this does NOT replace real medical help."
+            )
+
+            ts2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with history_lock:
-                conversation_history.append({
-                    "role": "assistant",
-                    "text": emergency_msg,
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                })
-            self.safe_insert(f"🤖 JARVIS AI: {emergency_msg}\n\n")
+                conversation_history.append({"role": "assistant", "text": emergency_msg, "time": ts2})
+
+            self.safe_insert(f"🤖 BAYMAX: {emergency_msg}\n\n")
+
             if self.speak_responses:
                 threading.Thread(target=speak_text, args=(emergency_msg,), daemon=True).start()
             return
 
         self.cancel_event.clear()
         self.set_busy(True)
-        self.safe_insert("🤖 JARVIS AI: ")  # prefix line; stream will append
+        self.safe_insert("🤖 BAYMAX: ")
 
         def worker(user_text: str):
             resp_accum = []
@@ -354,9 +598,7 @@ class BaymaxApp:
                         break
                     if chunk:
                         resp_accum.append(chunk)
-                        # append chunk to UI
                         self.safe_insert(chunk)
-                # newline finish
                 self.safe_insert("\n\n")
             except requests.RequestException as e:
                 error_text = f"Error contacting model: {e}"
@@ -365,27 +607,28 @@ class BaymaxApp:
             finally:
                 final_text = "".join(resp_accum)
                 if self.cancel_event.is_set():
-                    final_text = final_text + "\n(Generation canceled by user.)"
+                    final_text += "\n(Generation canceled by user.)"
                 if error_text:
                     self.safe_insert(error_text + "\n\n")
                     final_text = error_text
-                # record to history
+
+                ts3 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 with history_lock:
                     conversation_history.append({
                         "role": "assistant",
                         "text": final_text,
-                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "time": ts3,
                     })
-                # optional TTS
+
                 if self.speak_responses and final_text and not self.cancel_event.is_set():
                     threading.Thread(target=speak_text, args=(final_text,), daemon=True).start()
-                # reset busy
+
                 self.set_busy(False)
 
-            
         self.current_thread = threading.Thread(target=worker, args=(text,), daemon=True)
         self.current_thread.start()
 
+    # ------------- Voice -------------
     def listen_and_submit(self):
         recognizer = sr.Recognizer()
         try:
@@ -403,6 +646,7 @@ class BaymaxApp:
         except Exception as e:
             self.safe_insert(f"❌ Microphone error: {e}\n\n")
 
+    # ------------- Wearable mock -------------
     def fetch_wearable(self):
         data = {
             "hr": 72,
@@ -412,8 +656,9 @@ class BaymaxApp:
         }
         self.safe_insert(f"📟 Wearable: {json.dumps(data, indent=0)}\n\n")
 
+    # ------------- Chat saving / clearing -------------
     def clear_chat(self):
-        if messagebox.askyesno("Clear chat", "Are you sure you want to clear the conversation history?"):
+        if messagebox.askyesno("Clear chat", "Clear conversation history?"):
             self.chat_window.config(state=tk.NORMAL)
             self.chat_window.delete("1.0", tk.END)
             self.chat_window.config(state=tk.DISABLED)
@@ -441,7 +686,8 @@ class BaymaxApp:
                 messagebox.showinfo("Export", "No messages to export.")
                 return
             path = filedialog.asksaveasfilename(
-                defaultextension=".txt", filetypes=[("Text files", "*.txt")]
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt")],
             )
             if not path:
                 return
@@ -450,10 +696,13 @@ class BaymaxApp:
                     f.write(f"[{msg['time']}] {msg['role'].upper()}: {msg['text']}\n")
             messagebox.showinfo("Exported", f"Plain text exported to {path}")
 
+    # ------------- Settings -------------
     def open_settings(self):
+        global REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT, MODEL_NAME, API_GENERATE, DEFAULT_CONTACT_REGION
+
         win = tk.Toplevel(self.root)
         win.title("Settings")
-        win.geometry("480x320")
+        win.geometry("520x420")
 
         tk.Label(win, text="Model Endpoint (URL):").pack(anchor=tk.W, padx=10, pady=(10, 0))
         ep_entry = tk.Entry(win, width=80)
@@ -475,15 +724,27 @@ class BaymaxApp:
         to_read_entry.insert(0, str(REQUEST_READ_TIMEOUT))
         to_read_entry.pack(padx=10)
 
+        tk.Label(win, text="Emergency region:").pack(anchor=tk.W, padx=10, pady=(10, 0))
+        region_var = tk.StringVar(value=DEFAULT_CONTACT_REGION)
+        tk.OptionMenu(win, region_var, "india", "global", "us_uk").pack(anchor=tk.W, padx=10)
+
+        cam_var = tk.BooleanVar(value=self.enable_camera)
+        tk.Checkbutton(win, text="Enable camera emotion polling", variable=cam_var).pack(
+            anchor=tk.W, padx=10, pady=(10, 0)
+        )
+
         speak_var = tk.BooleanVar(value=self.speak_responses)
         tk.Checkbutton(win, text="Speak responses (TTS)", variable=speak_var).pack(
             anchor=tk.W, padx=10, pady=(10, 0)
         )
 
         def save_and_close():
-            global API_GENERATE, MODEL_NAME, REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT
+            nonlocal region_var, cam_var, speak_var
+            global API_GENERATE, MODEL_NAME, REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT, DEFAULT_CONTACT_REGION
+
             API_GENERATE = ep_entry.get().strip() or API_GENERATE
             MODEL_NAME = model_entry.get().strip() or MODEL_NAME
+
             try:
                 REQUEST_CONNECT_TIMEOUT = int(to_conn_entry.get().strip())
             except Exception:
@@ -492,43 +753,50 @@ class BaymaxApp:
                 REQUEST_READ_TIMEOUT = int(to_read_entry.get().strip())
             except Exception:
                 pass
+
+            DEFAULT_CONTACT_REGION = region_var.get()
             self.speak_responses = bool(speak_var.get())
+
+            new_cam = bool(cam_var.get())
+            if new_cam and not self.enable_camera:
+                self.enable_camera = True
+                self.start_camera_thread()
+            elif not new_cam and self.enable_camera:
+                self.enable_camera = False
+                self.stop_camera_thread()
+
             win.destroy()
-            messagebox.showinfo("Settings", "Saved settings. Changes to endpoint may require restart.")
+            messagebox.showinfo("Settings", "Settings saved. Endpoint changes may require restart.")
 
         tk.Button(win, text="Save", command=save_and_close).pack(pady=12)
 
-
 # -----------------------------
-# Main entry
+# Main
 # -----------------------------
-
 def main():
-    # 1) Ensure Ollama server is running (auto-start if needed)
     ok = ensure_ollama_running(timeout=OLLAMA_START_WAIT)
     if not ok:
-        print("Please install Ollama (https://ollama.com) and ensure `ollama serve` works from a terminal.")
+        print("Ollama not running and could not be auto-started.")
         try:
-            if not messagebox.askyesno(
+            proceed = messagebox.askyesno(
                 "Ollama not running",
-                "Ollama server not running and could not be started.\nContinue anyway (you must have a different endpoint configured)?",
-            ):
-                return
+                "Ollama server is not running and could not be started.\n"
+                "Continue anyway? (You must point to some other working endpoint in Settings.)",
+            )
         except Exception:
-            # In case Tk is not yet initialized on some platforms
+            proceed = False
+        if not proceed:
             return
 
-    # 2) Initialize TTS if available
     init_tts()
-
-    # 3) Preload model once so first real call is faster
     preload_model()
 
-    # 4) Start GUI
     root = tk.Tk()
     app = BaymaxApp(root)
-    root.mainloop()
-
+    try:
+        root.mainloop()
+    finally:
+        app.stop_camera_thread()
 
 if __name__ == "__main__":
     main()
