@@ -121,7 +121,7 @@ async def emergency_endpoint(region: str = "india"):
 
 # Serving the static frontend directory.
 # API routes must be registered before mounting the catch-all StaticFiles directory.
-frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
+frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
 if os.path.exists(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="static")
 else:
