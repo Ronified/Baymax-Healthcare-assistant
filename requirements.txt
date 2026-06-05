@@ -2,3 +2,6 @@ requests
 tkinter
 speechrecognition
 pyttsx3
+fastapi
+uvicorn
+pydantic
